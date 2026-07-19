@@ -1,5 +1,5 @@
 streamlit>=1.37.0
-huggingface_hub>=0.24.0
+groq>=0.11.0
 supabase>=2.5.0
 Pillow>=10.3.0
 googlesearch-python>=1.2.5
