@@ -1,9 +1,9 @@
 """
 app.py — Emotional AI Task & Research Agent (Backend)
-Hugging Face Spaces (Streamlit) হোস্টিং-এর জন্য ডিজাইন করা।
+Render.com / Hugging Face Spaces (Streamlit) হোস্টিং-এর জন্য ডিজাইন করা।
 
 ফিচারসমূহ:
- 1. Llama-3.2-Vision (HF Inference API) — টেক্সট + ইমেজ প্রসেসিং
+ 1. Groq API (Llama/Qwen vision-capable মডেল) — টেক্সট + ইমেজ প্রসেসিং, সম্পূর্ণ ফ্রি টায়ার
  2. ফ্রি ওয়েব সার্চ টুল (googlesearch-python + duckduckgo fallback)
  3. Supabase (Postgres + Storage) ইন্টিগ্রেশন
  4. আপলোডের আগে ব্যাকএন্ডে ইমেজ কমপ্রেশন
@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 import streamlit as st
 from PIL import Image
 
-from huggingface_hub import InferenceClient
+from groq import Groq
 from supabase import create_client, Client
 
 try:
@@ -51,19 +51,22 @@ logger = logging.getLogger("emotional-ai-agent")
 # ============================================================
 # ENVIRONMENT VARIABLES (Hugging Face Space → Settings → Variables and secrets)
 # ============================================================
-HF_TOKEN = os.environ.get("HF_TOKEN")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 SUPABASE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "user-images")
 FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON")
-LLAMA_MODEL_ID = os.environ.get("LLAMA_MODEL_ID", "meta-llama/Llama-3.2-11B-Vision-Instruct")
+# ছবি + টেক্সট দুটোই প্রসেস করতে পারে এমন Groq vision মডেল (প্রয়োজনে env var দিয়ে বদলানো যাবে)
+GROQ_VISION_MODEL_ID = os.environ.get("GROQ_VISION_MODEL_ID", "qwen/qwen3.6-27b")
+# শুধু টেক্সট চ্যাটের জন্য দ্রুততর/সস্তা মডেল (ছবি ছাড়া মেসেজে ব্যবহৃত হবে)
+GROQ_TEXT_MODEL_ID = os.environ.get("GROQ_TEXT_MODEL_ID", "openai/gpt-oss-120b")
 
-_REQUIRED_ENV = {"HF_TOKEN": HF_TOKEN, "SUPABASE_URL": SUPABASE_URL, "SUPABASE_KEY": SUPABASE_KEY}
+_REQUIRED_ENV = {"GROQ_API_KEY": GROQ_API_KEY, "SUPABASE_URL": SUPABASE_URL, "SUPABASE_KEY": SUPABASE_KEY}
 _missing = [k for k, v in _REQUIRED_ENV.items() if not v]
 if _missing:
     st.error(
         f"⚠️ প্রয়োজনীয় Environment Variable পাওয়া যায়নি: **{', '.join(_missing)}**\n\n"
-        "Hugging Face Space → Settings → *Variables and secrets* থেকে যোগ করুন।"
+        "Render → Environment থেকে যোগ করুন।"
     )
     st.stop()
 
@@ -80,8 +83,8 @@ def get_supabase_client() -> Client:
 
 
 @st.cache_resource
-def get_llama_client() -> InferenceClient:
-    return InferenceClient(model=LLAMA_MODEL_ID, token=HF_TOKEN)
+def get_groq_client() -> Groq:
+    return Groq(api_key=GROQ_API_KEY)
 
 
 @st.cache_resource
@@ -100,7 +103,7 @@ def get_firebase_app():
 
 
 supabase: Client = get_supabase_client()
-llama_client: InferenceClient = get_llama_client()
+groq_client: Groq = get_groq_client()
 firebase_app = get_firebase_app()
 
 
@@ -282,7 +285,7 @@ def web_search_tool(query: str, num_results: int = 5) -> list[dict]:
 
 
 # ============================================================
-# Llama-3.2-Vision কল
+# Groq দিয়ে AI কল (টেক্সট + ভিশন)
 # ============================================================
 
 def _image_to_data_url(image_bytes: bytes) -> str:
@@ -290,12 +293,16 @@ def _image_to_data_url(image_bytes: bytes) -> str:
     return f"data:image/jpeg;base64,{b64}"
 
 
-def call_llama_vision(
+def call_ai(
     user_text: str,
     image_bytes: bytes | None = None,
     chat_history: list | None = None,
     search_context: str = "",
 ) -> str:
+    """
+    ছবি থাকলে GROQ_VISION_MODEL_ID (multimodal) মডেল ব্যবহার করে,
+    নাহলে দ্রুততর GROQ_TEXT_MODEL_ID মডেল ব্যবহার করে।
+    """
     system_prompt = (
         "তুমি একজন সহানুভূতিশীল, ইমোশনালি ইন্টেলিজেন্ট AI অ্যাসিস্ট্যান্ট। "
         "ইউজারের টাস্ক ম্যানেজমেন্ট, রিসার্চ ও মানসিক সাপোর্টে সাহায্য করো। "
@@ -306,23 +313,33 @@ def call_llama_vision(
 
     messages = [{"role": "system", "content": system_prompt}]
     if chat_history:
-        messages.extend(chat_history[-10:])
+        # ছবিসহ পুরনো মেসেজ (list-type content) পাঠালে টেক্সট-অনলি মডেল এরর দিতে পারে,
+        # তাই হিস্ট্রিতে থাকা কনটেন্ট সবসময় প্লেইন টেক্সট হিসেবে রাখা হচ্ছে।
+        for m in chat_history[-10:]:
+            c = m["content"]
+            if isinstance(c, list):
+                c = next((b["text"] for b in c if b.get("type") == "text"), "")
+            messages.append({"role": m["role"], "content": c})
 
     if image_bytes:
         content = [
             {"type": "text", "text": user_text},
             {"type": "image_url", "image_url": {"url": _image_to_data_url(image_bytes)}},
         ]
+        model_id = GROQ_VISION_MODEL_ID
     else:
         content = user_text
+        model_id = GROQ_TEXT_MODEL_ID
 
     messages.append({"role": "user", "content": content})
 
     try:
-        response = llama_client.chat_completion(messages=messages, max_tokens=800, temperature=0.7)
+        response = groq_client.chat.completions.create(
+            model=model_id, messages=messages, max_tokens=800, temperature=0.7,
+        )
         return response.choices[0].message.content
     except Exception as e:
-        logger.error(f"Llama inference ব্যর্থ: {e}")
+        logger.error(f"Groq inference ব্যর্থ (model={model_id}): {e}")
         return "দুঃখিত, এই মুহূর্তে AI মডেলের সাথে সংযোগ করা যাচ্ছে না। একটু পরে আবার চেষ্টা করুন।"
 
 
@@ -526,7 +543,7 @@ with tab_chat:
 
         with st.chat_message("assistant"):
             with st.spinner("ভাবছি..."):
-                reply = call_llama_vision(
+                reply = call_ai(
                     user_text, image_bytes,
                     chat_history=st.session_state.chat_display,
                     search_context=search_context,
