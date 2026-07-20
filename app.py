@@ -307,6 +307,23 @@ def save_chat_message(user_id, role, content, image_url=None):
     }).execute()
 
 
+def touch_user_profile(user_id: str):
+    """ইউজার প্রোফাইল না থাকলে তৈরি করে (ডিফল্ট প্ল্যান 'free'), থাকলে last_active আপডেট করে।
+    এতে এডমিন প্যানেল সব ইউজার লিস্ট করতে পারবে।"""
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        existing = supabase.table("user_profiles").select("user_id").eq("user_id", user_id).execute()
+        if existing.data:
+            supabase.table("user_profiles").update({"last_active": now_iso}).eq("user_id", user_id).execute()
+        else:
+            supabase.table("user_profiles").insert({
+                "user_id": user_id, "plan": "free",
+                "created_at": now_iso, "last_active": now_iso,
+            }).execute()
+    except Exception as e:
+        logger.error(f"touch_user_profile ব্যর্থ: {e}")
+
+
 def load_chat_history(user_id, limit=20):
     res = (supabase.table("chat_history").select("role, content")
            .eq("user_id", user_id).order("created_at", desc=True).limit(limit).execute())
@@ -331,32 +348,39 @@ def chat():
       - message (text, required)
       - image (file, optional)
     """
-    user_id = request.form.get("user_id", "").strip()
-    user_text = request.form.get("message", "").strip()
-    if not user_id or not user_text:
-        return jsonify({"error": "user_id এবং message আবশ্যক"}), 400
+    try:
+        user_id = request.form.get("user_id", "").strip()
+        user_text = request.form.get("message", "").strip()
+        if not user_id or not user_text:
+            return jsonify({"error": "user_id এবং message আবশ্যক"}), 400
 
-    image_bytes, image_url = None, None
-    if "image" in request.files and request.files["image"].filename:
-        raw = request.files["image"].read()
-        image_bytes = compress_image(raw)
-        image_url = upload_image_to_supabase(image_bytes, user_id)
+        image_bytes, image_url = None, None
+        if "image" in request.files and request.files["image"].filename:
+            raw = request.files["image"].read()
+            image_bytes = compress_image(raw)
+            image_url = upload_image_to_supabase(image_bytes, user_id)
 
-    chat_history = load_chat_history(user_id)
+        chat_history = load_chat_history(user_id)
 
-    search_context = ""
-    if should_trigger_search(user_text):
-        results = web_search_tool(user_text)
-        search_context = "\n".join(
-            f"- {r.get('title', '')} — {r.get('url', '')} {r.get('snippet', '')}".strip() for r in results
-        )
+        search_context = ""
+        if should_trigger_search(user_text):
+            results = web_search_tool(user_text)
+            search_context = "\n".join(
+                f"- {r.get('title', '')} — {r.get('url', '')} {r.get('snippet', '')}".strip() for r in results
+            )
 
-    reply = call_ai(user_text, image_bytes, chat_history, search_context)
+        reply = call_ai(user_text, image_bytes, chat_history, search_context)
 
-    save_chat_message(user_id, "user", user_text, image_url)
-    save_chat_message(user_id, "assistant", reply)
+        save_chat_message(user_id, "user", user_text, image_url)
+        save_chat_message(user_id, "assistant", reply)
 
-    return jsonify({"reply": reply, "image_url": image_url})
+        return jsonify({"reply": reply, "image_url": image_url})
+    except Exception as e:
+        logger.exception("‌/chat route-এ ব্যর্থ")
+        # ডিবাগিং সহজ করতে আসল এরর মেসেজ রেসপন্সে ফেরত পাঠানো হচ্ছে।
+        # এটা শুধু ডেভেলপমেন্ট পর্যায়ে রাখুন — পাবলিক লঞ্চের আগে এই ডিটেইল সরিয়ে ফেলা উচিত,
+        # নাহলে আক্রমণকারীরা আপনার সিস্টেম সম্পর্কে বেশি তথ্য পেয়ে যেতে পারে।
+        return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
 
 
 @app.route("/chat/history", methods=["GET"])
