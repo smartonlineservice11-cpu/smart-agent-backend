@@ -377,10 +377,11 @@ def chat():
         return jsonify({"reply": reply, "image_url": image_url})
     except Exception as e:
         logger.exception("‌/chat route-এ ব্যর্থ")
-        # ডিবাগিং সহজ করতে আসল এরর মেসেজ রেসপন্সে ফেরত পাঠানো হচ্ছে।
-        # এটা শুধু ডেভেলপমেন্ট পর্যায়ে রাখুন — পাবলিক লঞ্চের আগে এই ডিটেইল সরিয়ে ফেলা উচিত,
-        # নাহলে আক্রমণকারীরা আপনার সিস্টেম সম্পর্কে বেশি তথ্য পেয়ে যেতে পারে।
-        return jsonify({"error": f"{type(e).__name__}: {str(e)}"}), 500
+        return jsonify({
+            "error": f"{type(e).__name__}: {str(e)}",
+            # সাময়িক ডিবাগ তথ্য — সমস্যা ধরার পর এই লাইনটা মুছে ফেলুন
+            "debug_supabase_url": repr(SUPABASE_URL),
+        }), 500
 
 
 @app.route("/chat/history", methods=["GET"])
