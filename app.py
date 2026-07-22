@@ -339,6 +339,30 @@ def health_check():
     return jsonify({"status": "ok", "service": "emotional-ai-agent-api"})
 
 
+@app.route("/debug-dns", methods=["GET"])
+def debug_dns():
+    """সাময়িক ডায়াগনস্টিক রুট — সমস্যা ধরার পর মুছে ফেলুন।"""
+    import socket
+    hosts_to_test = [
+        "iksvnwmhhstpojaeosgx.supabase.co",
+        "api.groq.com",
+        "google.com",
+    ]
+    results = {}
+    for host in hosts_to_test:
+        try:
+            ip = socket.getaddrinfo(host, 443)[0][4][0]
+            results[host] = {"ok": True, "ip": ip}
+        except Exception as e:
+            results[host] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    # env var-এ ভুলবশত কোনো proxy সেট থাকলে সেটাও এখানে দেখা যাবে
+    proxy_env = {k: os.environ.get(k) for k in
+                 ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+                 if os.environ.get(k)}
+    results["_proxy_env_vars_found"] = proxy_env or "কোনো proxy variable পাওয়া যায়নি (এটাই স্বাভাবিক)"
+    return jsonify(results)
+
+
 @app.route("/chat", methods=["POST"])
 @require_api_key
 def chat():
