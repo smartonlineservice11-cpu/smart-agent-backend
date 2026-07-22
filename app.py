@@ -356,30 +356,49 @@ def chat():
 
         image_bytes, image_url = None, None
         if "image" in request.files and request.files["image"].filename:
-            raw = request.files["image"].read()
-            image_bytes = compress_image(raw)
-            image_url = upload_image_to_supabase(image_bytes, user_id)
+            try:
+                raw = request.files["image"].read()
+                image_bytes = compress_image(raw)
+                image_url = upload_image_to_supabase(image_bytes, user_id)
+            except Exception as e:
+                return jsonify({"error": f"[step:image] {type(e).__name__}: {e}"}), 500
 
-        chat_history = load_chat_history(user_id)
+        try:
+            chat_history = load_chat_history(user_id)
+        except Exception as e:
+            return jsonify({"error": f"[step:load_history] {type(e).__name__}: {e}"}), 500
 
         search_context = ""
         if should_trigger_search(user_text):
-            results = web_search_tool(user_text)
-            search_context = "\n".join(
-                f"- {r.get('title', '')} — {r.get('url', '')} {r.get('snippet', '')}".strip() for r in results
-            )
+            try:
+                results = web_search_tool(user_text)
+                search_context = "\n".join(
+                    f"- {r.get('title', '')} — {r.get('url', '')} {r.get('snippet', '')}".strip()
+                    for r in results
+                )
+            except Exception as e:
+                return jsonify({"error": f"[step:web_search] {type(e).__name__}: {e}"}), 500
 
-        reply = call_ai(user_text, image_bytes, chat_history, search_context)
+        try:
+            reply = call_ai(user_text, image_bytes, chat_history, search_context)
+        except Exception as e:
+            return jsonify({"error": f"[step:call_ai] {type(e).__name__}: {e}"}), 500
 
-        save_chat_message(user_id, "user", user_text, image_url)
-        save_chat_message(user_id, "assistant", reply)
+        try:
+            save_chat_message(user_id, "user", user_text, image_url)
+        except Exception as e:
+            return jsonify({"error": f"[step:save_user_msg] {type(e).__name__}: {e}"}), 500
+
+        try:
+            save_chat_message(user_id, "assistant", reply)
+        except Exception as e:
+            return jsonify({"error": f"[step:save_assistant_msg] {type(e).__name__}: {e}"}), 500
 
         return jsonify({"reply": reply, "image_url": image_url})
     except Exception as e:
         logger.exception("‌/chat route-এ ব্যর্থ")
         return jsonify({
-            "error": f"{type(e).__name__}: {str(e)}",
-            # সাময়িক ডিবাগ তথ্য — সমস্যা ধরার পর এই লাইনটা মুছে ফেলুন
+            "error": f"[step:unknown] {type(e).__name__}: {str(e)}",
             "debug_supabase_url": repr(SUPABASE_URL),
         }), 500
 
